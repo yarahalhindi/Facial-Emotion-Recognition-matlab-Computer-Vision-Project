@@ -1,0 +1,80 @@
+rng(42);
+datasetPath = 'C:\Users\mohma\OneDrive\Desktop\New folder (7)\dataset\';
+
+% تحميل الصور
+imds = imageDatastore(datasetPath, ...
+    'IncludeSubfolders', true, ...
+    'LabelSource', 'foldernames');
+
+% تقسيم البيانات
+[imdsTrain, imdsTest] = splitEachLabel(imds, 0.8, 'randomized');
+
+augmenter = imageDataAugmenter( ...
+    'RandRotation', [-15, 15], ...
+    'RandXTranslation', [-10 10], ...
+    'RandYTranslation', [-10 10], ...
+    'RandXReflection', true, ...
+    'RandYScale', [0.9, 1.1]);
+
+augTrain = augmentedImageDatastore(inputSize, imdsTrain, 'DataAugmentation', augmenter);
+
+% تحميل MobileNetV2
+net = mobilenetv2;
+inputSize = net.Layers(1).InputSize;
+
+% التأكد من قراءة الصور بشكل صحيح
+imdsTrain.ReadFcn = @(filename) preprocessImage(filename, inputSize);
+imdsTest.ReadFcn = @(filename) preprocessImage(filename, inputSize);
+
+% Augmented datastore
+augTrain = augmentedImageDatastore(inputSize, imdsTrain);
+augTest = augmentedImageDatastore(inputSize, imdsTest);
+
+% عدد الفئات
+numClasses = numel(categories(imdsTrain.Labels));
+
+% تعديل الطبقات الأخيرة من الشبكة
+lgraph = layerGraph(net);
+
+% احذف الطبقات الأخيرة حسب الأسماء الفعلية لـ MobileNetV2
+lgraph = removeLayers(lgraph, {'Logits', 'Logits_softmax', 'ClassificationLayer_Logits'});
+
+% أضف طبقات جديدة
+newLayers = [
+    fullyConnectedLayer(numClasses, 'Name', 'fc_new')
+    softmaxLayer('Name', 'softmax')
+    classificationLayer('Name', 'classification')];
+
+% اربط الطبقات الجديدة مع القديمة
+lgraph = addLayers(lgraph, newLayers);
+lgraph = connectLayers(lgraph, 'global_average_pooling2d_1', 'fc_new');
+
+% خيارات التدريب
+options = trainingOptions('adam', ...
+    'InitialLearnRate',0.0001, ...
+    'MaxEpochs',10, ...
+    'MiniBatchSize',16, ...
+    'Shuffle','every-epoch', ...
+    'ValidationData', augTest, ...
+    'ValidationFrequency', 30, ...
+    'Verbose',false, ...
+    'Plots','training-progress');
+
+% تدريب النموذج
+net = trainNetwork(augTrain, lgraph, options);
+
+% تقييم الدقة
+YPred = classify(net, augTest);
+YTest = imdsTest.Labels;
+accuracy = sum(YPred == YTest)/numel(YTest);
+fprintf('✅ MobileNetV2 Accuracy: %.2f%%\n', accuracy * 100);
+
+% --- دالة قراءة الصور ---
+function Iout = preprocessImage(filename, inputSize)
+    I = imread(filename);
+    if size(I,3) == 1
+        I = cat(3,I,I,I);
+    end
+    Iout = imresize(I, inputSize(1:2));
+end
+save('emotion_model_mobilenetv2.mat', 'net');
